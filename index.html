@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Memory Match</title>
+<style>
+  :root { --ink: #f6f1ff; --gold: #ffd166; --panel: #2a2150; }
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #1a1536; }
+  body { color: var(--ink); font: 15px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; user-select: none; -webkit-user-select: none; }
+  #board { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #safe { position: fixed; visibility: hidden; pointer-events: none; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  #status { position: fixed; left: 0; right: 0; top: 80px; text-align: center; pointer-events: none; padding: 0 12px; }
+  #statusText { font-weight: 800; font-size: 19px; text-shadow: 0 2px 6px #000c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #sub { font-size: 13px; opacity: .8; min-height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #net { position: fixed; bottom: max(4px, env(safe-area-inset-bottom)); left: 0; right: 0; text-align: center; font-size: 12px; opacity: .7; pointer-events: none; }
+  #toast { position: fixed; left: 50%; top: 45%; transform: translateX(-50%); padding: 8px 16px; border-radius: 999px; background: #000b; font-weight: 700;
+           pointer-events: none; transition: opacity .4s; white-space: nowrap; max-width: calc(100vw - 32px); overflow: hidden; text-overflow: ellipsis; }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0008; z-index: 30; }
+  #over[hidden] { display: none; }
+  .box { box-sizing: border-box; width: min(380px, calc(100vw - 32px)); max-height: 88vh; overflow: auto; padding: 18px 20px; border-radius: 18px; background: var(--panel);
+         border: 1px solid #ffffff22; text-align: center; box-shadow: 0 20px 60px #0009; }
+  .box h2 { margin: 0 0 4px; font-size: 26px; } .box p { margin: 0 0 10px; opacity: .85; }
+  .box h3 { margin: 8px 0 4px; font-size: 13px; color: var(--gold); text-align: left; }
+  .box ol { text-align: left; margin: 0 0 10px; padding-left: 24px; font-size: 14px; min-height: 24px; } .box li span { float: right; }
+  .row { display: flex; gap: 8px; align-items: center; text-align: left; font-size: 15px; padding: 3px 0; }
+  .row i { width: 12px; height: 12px; border-radius: 50%; flex: none; } .row span { flex: 1; } .row b { min-width: 30px; text-align: right; }
+  button { min-height: 48px; border-radius: 12px; border: 0; font: 800 16px system-ui, sans-serif; cursor: pointer; }
+  .box button { width: 100%; margin-top: 8px; background: var(--gold); color: #2a1d00; }
+  .hide { display: none !important; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="board"></canvas>
+<div id="safe"></div>
+<div id="status"><div id="statusText"></div><div id="sub"></div></div>
+<div id="toast" style="opacity:0"></div>
+<div id="net">Connecting…</div>
+<div id="over" hidden><div class="box">
+  <h2 id="overTitle"></h2><p id="overSub"></p>
+  <div id="scores"></div>
+  <h3>Most pairs found</h3><ol id="lb"><li>Loading…</li></ol>
+  <button id="again">Play again</button>
+</div></div>
+<script>
+/* ═══ MEMORY MATCH · a Multiplayer Agent starter ══════════════════════════════════════════
+ * Flip two cards. A pair is yours and you go again; a miss passes the turn. Most pairs wins.
+ * Turn-based, 1–4 players; a bot takes the empty seat when you're alone.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ board size, seats, timers, how well bots remember, the leaderboard
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   DECK .......... the seeded shuffle (same seed = same board everywhere)
+ *   FACES ......... the 16 card pictures, drawn with canvas shapes
+ *   GAME (HOST) ... seats, flips, pairs and misses, bots, the turn timer, results.
+ *                   Only the host writes the shared `game` field.
+ *   MY TURN ....... tapping a card, the flip I'm waiting on, autopilot for ?attract
+ *   SCREEN ........ the card grid, flipping, the seat chips, sparkles, sounds
+ *   HUD & RESULTS . status line, the results card and the leaderboard
+ *   INPUT / LOOP .. taps and keys, heartbeat, color fix, the main loop
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - The whole game lives in ONE shared field, `game`: {id, v, ph "play"|"over", host, seed, n,
+ *     seats, scores, gone, up, turn, starter, t, turnAt, turnEnds, resolveAt, seen, last,
+ *     winner, endsAt}. Only the HOST writes it, and `v` goes up on every write.
+ *   - The deck order is NOT in state: the host picks a `seed`, and every screen shuffles the same
+ *     deck from it with a seeded random (mulberry32). `gone` marks taken cards ("." = still on the
+ *     board, "a"–"d" = the seat that took it); `up` is the 0–2 cards face up right now.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
+ *     worked out every frame. It checks every flip, decides pairs and misses, plays the bots'
+ *     turns and ends the game. A new host carries on from `game`: nothing else to rebuild.
+ *   - Each player writes its OWN entity: `n` (name), `c` (color), `hb` (heartbeat).
+ *   - Players send intents to the host: "flip" {g, t, c}, "again" {g}. `t` counts every flip,
+ *     so an old or double intent is ignored. The host applies its own flips directly.
+ *   - Timers are timestamps: resolveAt (two cards face up until then), turnEnds (then the host
+ *     flips for you), endsAt (next game).
+ *   - Bots remember cards from `seen` (the last flips, public anyway) and sometimes forget.
+ *   - ?attract plays offline with bots (and your turns on autopilot) for the preview video.
+ *   - Leaderboard "pairs": every pair a player finds, added up, shown after every game.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  pairs: 12,           // pairs on the board (2 to 16)
+  seats: 2,            // bots fill the table up to this many players (1 to 4)
+  maxSeats: 4,         // players per game; anyone else watches until the next game
+  turnMs: 15000,       // time to flip before the host flips for you
+  peekMs: 1100,        // two cards stay face up this long, then they match or turn back
+  botMs: 750,          // how long a bot waits before each flip
+  botMemory: 0.7,      // chance a bot remembers a card it saw (less for older flips)
+  resultsMs: 15000,    // the results show this long, then a new game deals
+  seatGraceMs: 8000,   // a player silent this long hands its seat to a bot
+  board: "pairs",      // leaderboard name
+  attractTaken: 1,     // ?attract: pairs already found when a game starts
+};
+const BOT_NAMES = ["Recall Rex", "Pixel Pip", "Flipper"];
+const COLORS = ["#ff8fab", "#4cc9f0", "#ffd166", "#80ed99", "#c77dff", "#ff9f1c", "#f15bb5", "#64dfdf"];
+const NAME_A = ["Happy", "Sneaky", "Lucky", "Quick", "Jolly", "Clever"], NAME_B = ["Otter", "Panda", "Fox", "Koala", "Badger", "Moose"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'memory-match',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map();
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+/** Still in the room and heard from within the seat grace time. */
+const stillHere = (id) => id === net.sessionId || (!!S.entities.players[id] && performance.now() - (seenHb.get(id)?.at ?? -1e9) < CONFIG.seatGraceMs);
+
+// ── DECK ────────────────────────────────────────────────────────────────────────────
+// Card i shows picture deckOf(g)[i]. The order comes from the game's seed, so it is never sent:
+// every screen shuffles the same deck from the same seed.
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function seededShuffle(a, r) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+const deckMemo = { key: "", deck: [] };
+function deckOf(g) {
+  const key = g.seed + ":" + g.n;
+  if (deckMemo.key !== key) {
+    const r = mulberry32(g.seed), pics = seededShuffle(FACES.map((_, k) => k), r).slice(0, g.n / 2); // which pictures this game uses
+    deckMemo.key = key; deckMemo.deck = seededShuffle([...pics, ...pics], r);
+  }
+  return deckMemo.deck;
+}
+const SEAT_MARK = "abcd"; // gone[i]: "." still on the board, or the letter of the seat that took it
+
+// ── FACES ───────────────────────────────────────────────────────────────────────────
+// Each picture is a colored shape drawn in a box from -1 to 1. Add one by adding a line here.
+const TAU = Math.PI * 2;
+let cx = null; // the canvas context (set in SCREEN)
+const poly = (pts) => { cx.beginPath(); pts.forEach(([x, y], i) => (i ? cx.lineTo(x, y) : cx.moveTo(x, y))); cx.closePath(); };
+const disc = (x, y, r) => { cx.beginPath(); cx.arc(x, y, r, 0, TAU); };
+const FACES = [
+  { col: "#ff9f1c", draw() { disc(0, 0, 0.36); cx.fill(); for (let k = 0; k < 8; k++) { const a = (k / 8) * TAU; cx.beginPath(); cx.moveTo(Math.cos(a) * 0.5, Math.sin(a) * 0.5); cx.lineTo(Math.cos(a) * 0.76, Math.sin(a) * 0.76); cx.stroke(); } } }, // sun
+  { col: "#ef476f", draw() { cx.beginPath(); cx.moveTo(0, 0.62); cx.bezierCurveTo(-0.95, 0, -0.55, -0.8, 0, -0.32); cx.bezierCurveTo(0.55, -0.8, 0.95, 0, 0, 0.62); cx.fill(); } }, // heart
+  { col: "#ffd60a", draw() { poly(Array.from({ length: 10 }, (_, k) => { const a = -Math.PI / 2 + (k * Math.PI) / 5, r = k % 2 ? 0.32 : 0.78; return [Math.cos(a) * r, Math.sin(a) * r + 0.05]; })); cx.fill(); } }, // star
+  { col: "#38b000", draw() { cx.beginPath(); cx.moveTo(0, -0.78); cx.quadraticCurveTo(0.75, -0.1, 0, 0.72); cx.quadraticCurveTo(-0.75, -0.1, 0, -0.78); cx.fill(); cx.strokeStyle = "#ffffffaa"; cx.lineWidth = 0.07; cx.beginPath(); cx.moveTo(0, -0.55); cx.lineTo(0, 0.8); cx.stroke(); } }, // leaf
+  { col: "#3a86ff", draw() { cx.beginPath(); cx.moveTo(0, -0.8); cx.bezierCurveTo(0.6, -0.1, 0.6, 0.66, 0, 0.66); cx.bezierCurveTo(-0.6, 0.66, -0.6, -0.1, 0, -0.8); cx.fill(); } }, // drop
+  { col: "#9b8cff", draw() { cx.save(); cx.beginPath(); cx.rect(-1, -1, 2, 2); cx.arc(0.3, -0.18, 0.56, 0, TAU); cx.clip("evenodd"); disc(0, 0, 0.66); cx.fill(); cx.restore(); } }, // moon
+  { col: "#f77f00", draw() { poly([[0.18, -0.82], [-0.46, 0.1], [-0.04, 0.1], [-0.2, 0.82], [0.46, -0.16], [0.04, -0.16]]); cx.fill(); } }, // bolt
+  { col: "#ff5fa2", draw() { for (let k = 0; k < 5; k++) { const a = (k / 5) * TAU - Math.PI / 2; disc(Math.cos(a) * 0.38, Math.sin(a) * 0.38, 0.3); cx.fill(); } cx.fillStyle = "#ffd166"; disc(0, 0, 0.24); cx.fill(); } }, // flower
+  { col: "#00b4d8", draw() { poly([[-0.66, -0.2], [-0.32, -0.62], [0.32, -0.62], [0.66, -0.2], [0, 0.72]]); cx.fill(); cx.strokeStyle = "#ffffffaa"; cx.lineWidth = 0.06; cx.beginPath(); cx.moveTo(-0.66, -0.2); cx.lineTo(0.66, -0.2); cx.moveTo(-0.2, -0.2); cx.lineTo(0, 0.7); cx.lineTo(0.2, -0.2); cx.stroke(); } }, // gem
+  { col: "#2ec4b6", draw() { cx.beginPath(); cx.ellipse(-0.1, 0, 0.55, 0.36, 0, 0, TAU); cx.fill(); poly([[0.35, 0], [0.8, -0.38], [0.8, 0.38]]); cx.fill(); cx.fillStyle = "#fff"; disc(-0.36, -0.08, 0.09); cx.fill(); } }, // fish
+  { col: "#e63946", draw() { cx.beginPath(); cx.arc(0, 0.05, 0.7, Math.PI, TAU); cx.closePath(); cx.fill(); cx.fillStyle = "#f4e3c1"; cx.fillRect(-0.2, 0.05, 0.4, 0.62); cx.fillStyle = "#fff"; for (const [x, y] of [[-0.35, -0.2], [0.1, -0.42], [0.38, -0.12]]) { disc(x, y, 0.11); cx.fill(); } } }, // mushroom
+  { col: "#6cb4ee", draw() { disc(-0.32, 0.12, 0.3); cx.fill(); disc(0.05, -0.12, 0.4); cx.fill(); disc(0.4, 0.14, 0.28); cx.fill(); cx.fillRect(-0.32, 0.12, 0.72, 0.3); } }, // cloud
+  { col: "#2d6a4f", draw() { poly([[0, -0.82], [0.55, 0.05], [-0.55, 0.05]]); cx.fill(); poly([[0, -0.45], [0.66, 0.42], [-0.66, 0.42]]); cx.fill(); cx.fillStyle = "#8d5524"; cx.fillRect(-0.12, 0.42, 0.24, 0.36); } }, // tree
+  { col: "#e9b949", draw() { poly([[-0.7, 0.45], [-0.7, -0.45], [-0.35, -0.05], [0, -0.6], [0.35, -0.05], [0.7, -0.45], [0.7, 0.45]]); cx.fill(); cx.fillStyle = "#ef476f"; disc(0, 0.18, 0.12); cx.fill(); } }, // crown
+  { col: "#8d99ae", draw() { cx.beginPath(); cx.arc(0, -0.1, 0.55, Math.PI, TAU); cx.lineTo(0.55, 0.65); for (let k = 0; k < 4; k++) cx.lineTo(0.55 - (k + 0.5) * 0.275, k % 2 ? 0.65 : 0.45); cx.lineTo(-0.55, 0.65); cx.closePath(); cx.fill(); cx.fillStyle = "#fff"; disc(-0.2, -0.12, 0.12); cx.fill(); disc(0.2, -0.12, 0.12); cx.fill(); } }, // ghost
+  { col: "#c77dff", draw() { disc(0, 0, 0.42); cx.fill(); cx.lineWidth = 0.1; cx.beginPath(); cx.ellipse(0, 0, 0.8, 0.24, -0.4, 0, TAU); cx.stroke(); } }, // planet
+];
+/** One card's picture at (x, y), r = half its size. */
+function paintFace(k, x, y, r) {
+  const f = FACES[k % FACES.length];
+  cx.save(); cx.translate(x, y); cx.scale(r, r);
+  cx.fillStyle = f.col + "24"; disc(0, 0, 0.98); cx.fill();
+  cx.fillStyle = f.col; cx.strokeStyle = f.col; cx.lineWidth = 0.13; cx.lineCap = "round"; cx.lineJoin = "round";
+  f.draw();
+  cx.restore();
+}
+
+// ── GAME (HOST) ─────────────────────────────────────────────────────────────────────
+const host = { last: null, inbox: [] };
+const gameMemo = { raw: undefined, g: null };
+/** The game as state has it, or the host's own newer write that hasn't come back yet. */
+function game() {
+  if (gameMemo.raw !== S.shared.game) { gameMemo.raw = S.shared.game; gameMemo.g = parse(S.shared.game, null); }
+  const g = gameMemo.g;
+  return host.last && isHost() && (!g || host.last.v > g.v) ? host.last : g;
+}
+function writeGame(g) { g = { ...g, v: (game()?.v ?? 0) + 1 }; host.last = g; net.setShared("game", JSON.stringify(g)); return g; }
+const seatOf = (g, id) => (g ? g.seats.findIndex((s) => s.i === id) : -1);
+const playerName = (id) => (id === net.sessionId ? myName : S.entities.players[id]?.n || "Player");
+const playerColor = (id) => (id === net.sessionId ? myColor : S.entities.players[id]?.c || "#ccc");
+const seatName = (s) => (s.b ? s.n : playerName(s.i));
+const seatColor = (s) => (s.b ? s.c : playerColor(s.i));
+const onBoard = (g, c) => g.gone[c] === "." && !g.up.includes(c);
+
+/** A new game: players who were seated keep their seats, then waiting players, then bots; a fresh seed. */
+function newGame(prev) {
+  const live = livePlayers(), keep = prev ? prev.seats.filter((s) => !s.b && live.includes(s.i)).map((s) => s.i) : [];
+  const ids = [...keep, ...live.filter((id) => !keep.includes(id))].slice(0, CONFIG.maxSeats);
+  const used = new Set(ids.map(playerColor)), seats = ids.map((id) => ({ i: id, n: playerName(id), c: playerColor(id) }));
+  for (let k = 0; seats.length < Math.max(1, Math.min(CONFIG.maxSeats, CONFIG.seats)); k++) {
+    const c = COLORS.find((x) => !used.has(x)) || COLORS[k]; used.add(c);
+    seats.push({ i: "bot" + k, n: BOT_NAMES[k % BOT_NAMES.length], c, b: 1 });
+  }
+  const n = Math.max(2, Math.min(16, CONFIG.pairs)) * 2, now = Date.now(), starter = prev ? (prev.starter + 1) % seats.length : 0;
+  let g = { id: (prev?.id ?? 0) + 1, ph: "play", host: net.sessionId, seed: Math.floor(Math.random() * 2 ** 31), n, seats, scores: seats.map(() => 0),
+    gone: ".".repeat(n), up: [], turn: starter, starter, t: 0, turnAt: now + 900, turnEnds: now + 900 + CONFIG.turnMs, resolveAt: 0, seen: [], last: null, winner: -1, endsAt: 0 };
+  if (ATTRACT) g = attractStart(g);
+  return writeGame(g);
+}
+/** ?attract: a few pairs already taken and a few cards already seen, so the video is busy at once. */
+function attractStart(g) {
+  const deck = deckOf(g), gone = g.gone.split(""), scores = g.scores.slice();
+  for (let k = 0; k < CONFIG.attractTaken; k++) {
+    const a = gone.indexOf("."), b = deck.findIndex((f, i) => i !== a && f === deck[a] && gone[i] === "."), s = k % g.seats.length;
+    gone[a] = gone[b] = SEAT_MARK[s]; scores[s]++;
+  }
+  const seen = gone.map((m, i) => (m === "." ? i : -1)).filter((i) => i >= 0).sort(() => Math.random() - 0.5).slice(0, 8);
+  return { ...g, gone: gone.join(""), scores, seen, turnAt: Date.now() };
+}
+/** Seat `s` turns card `c` face up. The second card starts the peek; the host decides when it ends. */
+function flip(g, s, c) {
+  if (g.ph !== "play" || g.up.length >= 2 || !(c >= 0 && c < g.n) || !onBoard(g, c)) return null;
+  const up = [...g.up, c], now = Date.now();
+  return writeGame({ ...g, up, t: g.t + 1, turnAt: now, resolveAt: up.length === 2 ? now + CONFIG.peekMs : 0, seen: [...g.seen, c].slice(-40), last: { s, a: "flip", c, t: g.t + 1 } });
+}
+/** After the peek: a pair is taken and the same player goes again; a miss turns back and passes the turn. */
+function resolve(g) {
+  const [a, b] = g.up, s = g.turn, deck = deckOf(g), now = Date.now();
+  if (deck[a] !== deck[b]) return writeGame({ ...g, up: [], turn: (s + 1) % g.seats.length, t: g.t + 1, turnAt: now, turnEnds: now + CONFIG.turnMs, last: { s, a: "miss", c: a, d: b, t: g.t + 1 } });
+  const gone = g.gone.split(""); gone[a] = gone[b] = SEAT_MARK[s];
+  const scores = g.scores.slice(); scores[s]++;
+  const out = { ...g, gone: gone.join(""), scores, up: [], t: g.t + 1, turnAt: now, turnEnds: now + CONFIG.turnMs, last: { s, a: "pair", c: a, d: b, t: g.t + 1 } };
+  if (!out.gone.includes(".")) { // the board is empty: most pairs wins, a tie wins nothing
+    const top = Math.max(...scores), tops = scores.filter((x) => x === top).length;
+    Object.assign(out, { ph: "over", winner: tops === 1 ? scores.indexOf(top) : -1, endsAt: now + CONFIG.resultsMs });
+  }
+  return writeGame(out);
+}
+/** Where a bot flips: a pair it remembers, the partner of the card it just turned, else a card it hasn't seen. */
+function botFlip(g, s) {
+  const deck = deckOf(g), open = [...Array(g.n).keys()].filter((c) => onBoard(g, c)), known = new Map(); // picture -> cards it remembers
+  g.seen.slice().reverse().forEach((c, age) => {
+    if (!onBoard(g, c) || Math.random() > CONFIG.botMemory * Math.pow(0.95, age)) return;
+    const list = known.get(deck[c]) || []; if (!list.includes(c)) list.push(c); known.set(deck[c], list);
+  });
+  const remembered = new Set([...known.values()].flat()), fresh = open.filter((c) => !remembered.has(c));
+  const any = (list) => list[Math.floor(Math.random() * list.length)];
+  if (g.up.length === 1) {
+    const mate = open.find((c) => deck[c] === deck[g.up[0]] && remembered.has(c));
+    return mate !== undefined ? mate : any(fresh.length ? fresh : open);
+  }
+  for (const list of known.values()) if (list.length >= 2) return list[0];
+  return any(fresh.length ? fresh : open);
+}
+/** Gone players hand their seat (and pairs) to a bot; a waiting player takes a bot's seat. */
+function fixSeats(g) {
+  if (ATTRACT) return null;
+  const waiting = livePlayers().filter((id) => seatOf(g, id) < 0), seats = g.seats.slice();
+  let changed = false;
+  seats.forEach((s, i) => {
+    if (!s.b && !stillHere(s.i)) { seats[i] = { i: `bot-${g.id}-${i}`, n: BOT_NAMES.find((b) => !seats.some((x) => x.n === b)) || "Bot", c: s.c, b: 1 }; changed = true; }
+    else if (s.b && waiting.length) { const id = waiting.shift(); seats[i] = { i: id, n: playerName(id), c: playerColor(id) }; changed = true; }
+  });
+  return changed ? writeGame({ ...g, seats }) : null;
+}
+/** An intent from a player (or the host's own flip): only the player whose turn it is, on this exact `t`. */
+function handle({ type, from, data: d }) {
+  const g = game();
+  if (!g || !d || d.g !== g.id) return;
+  const i = seatOf(g, from);
+  if (type === "again" && g.ph === "over" && i >= 0) return newGame(g);
+  if (type === "flip" && g.ph === "play" && i === g.turn && d.t === g.t) flip(g, i, Number(d.c));
+}
+function hostTick() {
+  while (host.inbox.length) handle(host.inbox.shift());
+  const g = game(), t = Date.now();
+  if (!g) return newGame(null);
+  if (g.ph === "over") { if (t > g.endsAt) newGame(g); return; }
+  if (fixSeats(g)) return;
+  if (g.up.length === 2) { if (t > g.resolveAt) resolve(g); return; }
+  const s = g.seats[g.turn];
+  if ((s.b && t > g.turnAt + CONFIG.botMs) || t > g.turnEnds) flip(g, g.turn, botFlip(g, g.turn));
+}
+
+// ── MY TURN ─────────────────────────────────────────────────────────────────────────
+let pending = null, hintUntil = performance.now() + 14000;
+const mySeat = (g) => seatOf(g, net.sessionId);
+const myTurn = (g) => g.ph === "play" && g.turn === mySeat(g) && g.up.length < 2 && !(pending && pending.t === g.t);
+/** Send an intent to the host (the host applies its own). */
+function act(type, data) {
+  const g = game();
+  if (!g) return;
+  const msg = { g: g.id, t: g.t, ...data };
+  if (isHost()) host.inbox.push({ type, from: net.sessionId, data: msg }); else net.send(type, msg);
+}
+/** Tap a card: it turns over at once on my screen (the deck is the same everywhere) while the host checks it. */
+function tapCard(c) {
+  const g = game();
+  if (!g || !myTurn(g) || !onBoard(g, c)) return;
+  pending = { c, t: g.t, at: performance.now() }; hintUntil = 0;
+  sound("flip");
+  act("flip", { c });
+}
+/** ?attract: my turns play themselves, like a bot. */
+function autopilot(g) {
+  if (!ATTRACT || !myTurn(g) || Date.now() < g.turnAt + CONFIG.botMs) return;
+  tapCard(botFlip(g, g.turn));
+}
+
+// ── SCREEN ──────────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const cv = $("board");
+cx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1, inset = { t: 0, b: 0 };
+function fit() {
+  DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  const st = getComputedStyle($("safe")); inset = { t: parseFloat(st.paddingTop) || 0, b: parseFloat(st.paddingBottom) || 0 };
+}
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+/** The card grid: the column count that gives the biggest cards in the space under the seat chips. */
+function grid(g) {
+  const top = inset.t + (ATTRACT ? 70 : 126), bottom = inset.b + 26, aw = W - 20, ah = H - top - bottom, gap = 0.1, ratio = 1.3;
+  let best = null;
+  for (let cols = 2; cols <= 10; cols++) {
+    const rows = Math.ceil(g.n / cols), w = Math.min(aw / (cols + (cols - 1) * gap), ah / (rows * ratio + (rows - 1) * gap));
+    if (!best || w > best.w) best = { cols, rows, w };
+  }
+  const { cols, rows, w } = best, h = w * ratio, x0 = (W - (cols * w + (cols - 1) * w * gap)) / 2, y0 = top + (ah - (rows * h + (rows - 1) * w * gap)) / 2;
+  return Array.from({ length: g.n }, (_, i) => ({ x: x0 + (i % cols) * w * (1 + gap) + w / 2, y: y0 + Math.floor(i / cols) * (h + w * gap) + h / 2, w, h }));
+}
+/** Seat chips along the top: name, pairs, a gold edge and a timer on whoever's turn it is. */
+function chips(g) {
+  const n = g.seats.length, w = Math.min(170, (W - 20) / n - 8), x0 = W / 2 - (n * (w + 8) - 8) / 2;
+  return g.seats.map((_, i) => ({ x: x0 + i * (w + 8), y: inset.t + 10, w, h: 46 }));
+}
+function roundRect(x, y, w, h, r) { cx.beginPath(); cx.roundRect ? cx.roundRect(x, y, w, h, r) : cx.rect(x, y, w, h); }
+const look = []; // per card on screen: { f: 0 back .. 1 face, fly: {to, t0} }
+function drawCard(g, i, p, now, dt, shown) {
+  const L = look[i] || (look[i] = { f: 0 }), want = shown ? 1 : 0;
+  L.f += Math.sign(want - L.f) * Math.min(Math.abs(want - L.f), dt * 5.5);
+  let { x, y } = p, sc = 1, alpha = 1;
+  if (L.fly) { // a pair flying to its new owner's chip
+    const k = Math.min(1, (now - L.fly.t0) / 650), e = k < 0.3 ? 0 : (k - 0.3) / 0.7, ease = e * e * (3 - 2 * e);
+    x += (L.fly.to.x - x) * ease; y += (L.fly.to.y - y) * ease - Math.sin(ease * Math.PI) * 40; sc = 1 + (k < 0.3 ? k * 0.4 : 0.12 - ease * 0.82); alpha = 1 - ease * 0.6;
+    if (k >= 1) { L.fly = null; L.done = true; }
+  }
+  if (g.gone[i] !== "." && !L.fly) { // an empty spot: the picture that was here, faint, edged in the color of whoever took it
+    const s = g.seats[SEAT_MARK.indexOf(g.gone[i])];
+    cx.strokeStyle = (s ? seatColor(s) : "#fff") + "66"; cx.lineWidth = 2; cx.setLineDash([5, 5]); roundRect(p.x - p.w / 2, p.y - p.h / 2, p.w, p.h, p.w * 0.12); cx.stroke(); cx.setLineDash([]);
+    cx.globalAlpha = 0.28; paintFace(deckOf(g)[i], p.x, p.y, p.w * 0.3); cx.globalAlpha = 1;
+    return;
+  }
+  const miss = L.miss && now - L.miss < 380 ? Math.sin((now - L.miss) / 28) * 5 : 0, face = L.f > 0.5, squeeze = Math.abs(Math.cos(L.f * Math.PI));
+  const hover = !face && hoverCard === i && myTurn(g) ? 1.04 : 1;
+  cx.save(); cx.translate(x + miss, y); cx.scale(squeeze * sc * hover, sc * hover * (1 + (1 - squeeze) * 0.06)); cx.globalAlpha = alpha;
+  const w = p.w, h = p.h;
+  cx.shadowColor = "#0008"; cx.shadowBlur = w * 0.12; cx.shadowOffsetY = w * 0.05;
+  roundRect(-w / 2, -h / 2, w, h, w * 0.12);
+  if (face) {
+    cx.fillStyle = "#fffaf0"; cx.fill(); cx.shadowColor = "transparent";
+    const glow = L.pair && now - L.pair < 900;
+    cx.lineWidth = glow ? 4 : 2; cx.strokeStyle = glow ? "#ffd166" : g.up.includes(i) || (pending && pending.c === i) ? "#c77dff" : "#d9cfe8"; cx.stroke();
+    paintFace(deckOf(g)[i], 0, 0, w * 0.38);
+  } else {
+    const back = cx.createLinearGradient(0, -h / 2, 0, h / 2); back.addColorStop(0, "#5b3fd1"); back.addColorStop(1, "#3a2794");
+    cx.fillStyle = back; cx.fill(); cx.shadowColor = "transparent";
+    cx.save(); roundRect(-w / 2 + w * 0.08, -h / 2 + w * 0.08, w * 0.84, h - w * 0.16, w * 0.08); cx.clip();
+    cx.strokeStyle = "#ffffff18"; cx.lineWidth = 1.5;
+    for (let k = -6; k <= 6; k++) { cx.beginPath(); cx.moveTo(k * w * 0.18 - h, -h); cx.lineTo(k * w * 0.18 + h, h); cx.moveTo(k * w * 0.18 + h, -h); cx.lineTo(k * w * 0.18 - h, h); cx.stroke(); }
+    cx.restore();
+    cx.strokeStyle = "#ffd16699"; cx.lineWidth = 1.5; roundRect(-w / 2 + w * 0.08, -h / 2 + w * 0.08, w * 0.84, h - w * 0.16, w * 0.08); cx.stroke();
+    cx.fillStyle = "#ffd166"; cx.font = `900 ${Math.round(w * 0.34)}px system-ui, sans-serif`; cx.textAlign = "center"; cx.textBaseline = "middle"; cx.fillText("?", 0, w * 0.02);
+  }
+  cx.restore();
+}
+function drawChips(g, C, now) {
+  g.seats.forEach((s, i) => {
+    const c = C[i], turn = g.ph === "play" && g.turn === i, col = seatColor(s);
+    cx.fillStyle = turn ? "#3b2d78" : "#ffffff12"; roundRect(c.x, c.y, c.w, c.h, 14); cx.fill();
+    if (turn) {
+      cx.strokeStyle = "#ffd166"; cx.lineWidth = 2.5; cx.stroke();
+      const left = Math.max(0, Math.min(1, (g.turnEnds - Date.now()) / CONFIG.turnMs));
+      cx.fillStyle = "#ffd166"; cx.fillRect(c.x + 12, c.y + c.h - 5, (c.w - 24) * left, 3);
+    }
+    cx.fillStyle = col; cx.beginPath(); cx.arc(c.x + 22, c.y + c.h / 2, 14, 0, TAU); cx.fill();
+    cx.fillStyle = "#1a1536"; cx.font = "800 14px system-ui, sans-serif"; cx.textAlign = "center"; cx.textBaseline = "middle"; cx.fillText((seatName(s)[0] || "?").toUpperCase(), c.x + 22, c.y + c.h / 2 + 1);
+    cx.textAlign = "left"; cx.fillStyle = "#f6f1ff"; cx.font = "700 13px system-ui, sans-serif";
+    let name = s.i === net.sessionId ? "You" : seatName(s) + (s.b ? " 🤖" : "");
+    while (name.length > 3 && cx.measureText(name).width > c.w - 80) name = name.slice(0, -2) + "…";
+    cx.fillText(name, c.x + 42, c.y + c.h / 2);
+    const bump = pairAt[i] && now - pairAt[i] < 400 ? 1 + Math.sin(((now - pairAt[i]) / 400) * Math.PI) * 0.5 : 1;
+    cx.save(); cx.translate(c.x + c.w - 20, c.y + c.h / 2); cx.scale(bump, bump);
+    cx.fillStyle = "#ffd166"; cx.font = "900 18px system-ui, sans-serif"; cx.textAlign = "center"; cx.fillText(String(g.scores[i]), 0, 1); cx.restore();
+  });
+}
+const parts = [], pops = [], pairAt = [];
+function sparkle(x, y, col) { for (let k = 0; k < 22; k++) { const a = Math.random() * TAU, sp = 80 + Math.random() * 220; parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, c: k % 3 ? col : "#fff", life: 0.6 + Math.random() * 0.4, r: 2 + Math.random() * 3, g: 200 }); } }
+function confetti(x, y) { for (let k = 0; k < 100; k++) parts.push({ x, y, vx: (Math.random() - 0.5) * 600, vy: -200 - Math.random() * 450, c: COLORS[k % COLORS.length], life: 1.8, r: 4, g: 900, rect: true, rot: Math.random() * 6 }); }
+function popText(text, x, y, color, big) { pops.push({ text, x, y, color, big, t0: performance.now() }); }
+function drawFx(dt, now) {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i]; p.life -= dt;
+    if (p.life <= 0) { parts.splice(i, 1); continue; }
+    p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.99;
+    cx.globalAlpha = Math.min(1, p.life * 2); cx.fillStyle = p.c;
+    if (p.rect) { p.rot += dt * 8; cx.save(); cx.translate(p.x, p.y); cx.rotate(p.rot); cx.fillRect(-4, -2.5, 8, 5); cx.restore(); }
+    else { cx.beginPath(); cx.arc(p.x, p.y, p.r, 0, TAU); cx.fill(); }
+  }
+  cx.globalAlpha = 1;
+  for (let i = pops.length - 1; i >= 0; i--) {
+    const p = pops[i], k = (now - p.t0) / 1100;
+    if (k >= 1) { pops.splice(i, 1); continue; }
+    const sc = k < 0.15 ? 0.5 + (k / 0.15) * 0.7 : 1.2 - Math.min(0.2, (k - 0.15) * 0.8);
+    cx.save(); cx.translate(p.x, p.y - k * 30); cx.scale(sc, sc); cx.globalAlpha = k > 0.7 ? (1 - k) / 0.3 : 1;
+    cx.font = `900 ${p.big ? 30 : 22}px system-ui, sans-serif`; cx.textAlign = "center"; cx.textBaseline = "middle";
+    cx.lineWidth = 5; cx.strokeStyle = "#000a"; cx.strokeText(p.text, 0, 0); cx.fillStyle = p.color; cx.fillText(p.text, 0, 0);
+    cx.restore();
+  }
+}
+let seenT = "";
+/** When a flip, pair or miss lands in state: sounds, sparkles, the pair flies to its owner. */
+function effects(g, P, C) {
+  const key = g.id + ":" + g.t;
+  if (key === seenT) return;
+  const first = !seenT, fresh = seenT.split(":")[0] !== String(g.id);
+  seenT = key;
+  if (fresh) { look.length = 0; pending = null; }
+  if (first || fresh || !g.last || g.last.t !== g.t) return;
+  const L = g.last, now = performance.now();
+  if (L.a === "flip" && L.s !== mySeat(g)) sound("flip");
+  if (L.a === "miss") { for (const c of [L.c, L.d]) if (look[c]) look[c].miss = now; sound("miss"); }
+  if (L.a === "pair") {
+    const to = C[L.s], col = FACES[deckOf(g)[L.c] % FACES.length].col;
+    for (const c of [L.c, L.d]) { const l = look[c] || (look[c] = { f: 1 }); l.f = 1; l.pair = now; l.fly = { to: { x: to.x + to.w - 20, y: to.y + to.h / 2 }, t0: now }; sparkle(P[c].x, P[c].y, col); }
+    popText(L.s === mySeat(g) ? "Pair! Go again" : "Pair!", (P[L.c].x + P[L.d].x) / 2, (P[L.c].y + P[L.d].y) / 2, "#ffd166", false);
+    setTimeout(() => { pairAt[L.s] = performance.now(); }, 600);
+    sound("pair");
+    if (g.ph === "over" && g.winner >= 0) setTimeout(() => { const w = C[g.winner]; confetti(w.x + w.w / 2, w.y + w.h); sound("win"); }, 700);
+  }
+}
+let actx = null; // sounds start after the first tap (browsers require it)
+addEventListener("pointerdown", () => { if (!actx) try { actx = new AudioContext(); } catch {} });
+function sound(kind) {
+  if (!actx || ATTRACT) return;
+  const notes = { flip: [[880, 0, 0.05]], pair: [[660, 0, 0.12], [990, 0.1, 0.18]], miss: [[220, 0, 0.18]], win: [[523, 0, 0.15], [659, 0.12, 0.15], [784, 0.24, 0.3]] }[kind] || [];
+  for (const [f, at, len] of notes) {
+    const t = actx.currentTime + at, o = actx.createOscillator(), gn = actx.createGain();
+    o.type = kind === "miss" ? "sawtooth" : "triangle"; o.frequency.setValueAtTime(f, t);
+    gn.gain.setValueAtTime(kind === "miss" ? 0.06 : 0.14, t); gn.gain.exponentialRampToValueAtTime(0.001, t + len);
+    o.connect(gn).connect(actx.destination); o.start(t); o.stop(t + len + 0.02);
+  }
+}
+let cardsAt = [], chipsAt = [];
+function draw(g, now, dt) {
+  cx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const bg = cx.createRadialGradient(W / 2, H * 0.5, 40, W / 2, H * 0.5, Math.max(W, H) * 0.75);
+  bg.addColorStop(0, "#33287a"); bg.addColorStop(1, "#140f2c");
+  cx.fillStyle = bg; cx.fillRect(0, 0, W, H);
+  const P = (cardsAt = grid(g)), C = (chipsAt = chips(g));
+  effects(g, P, C);
+  if (pending && (pending.t !== g.t || performance.now() - pending.at > 2500)) pending = null;
+  const flying = [];
+  for (let i = 0; i < g.n; i++) {
+    if (look[i] && look[i].fly) { flying.push(i); continue; }
+    drawCard(g, i, P[i], now, dt, g.up.includes(i) || (pending && pending.c === i) || g.ph === "over");
+  }
+  drawChips(g, C, now);
+  for (const i of flying) drawCard(g, i, P[i], now, dt, true); // on top of everything
+  drawFx(dt, now);
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+let toastAt = 0, dropped = false, lb = null, resultsFor = -1, seatsSeen = null;
+function toast(text) { $("toast").textContent = text; $("toast").style.opacity = 1; toastAt = performance.now(); }
+function hud(g) {
+  if (performance.now() - toastAt > 2400) $("toast").style.opacity = 0;
+  const n = livePlayers().length, mine = mySeat(g), s = g.seats[g.turn];
+  $("net").textContent = ATTRACT ? "" : net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the game" : ""}`;
+  if (ATTRACT) { $("status").classList.add("hide"); $("over").hidden = true; return; }
+  const prev = seatsSeen; seatsSeen = { id: g.id, s: g.seats.map((x) => x.i) }; // someone took over from a bot, or a bot took over
+  if (prev && prev.id === g.id) g.seats.forEach((x, i) => { if (prev.s[i] !== x.i) toast(x.i === net.sessionId ? "You took over a seat" : `${seatName(x)} took over a seat`); });
+  let text, sub = "";
+  const left = g.gone.split("").filter((m) => m === ".").length / 2;
+  if (g.ph === "over") text = g.winner < 0 ? "It's a tie!" : g.winner === mine ? "You win!" : `${seatName(g.seats[g.winner])} wins!`;
+  else if (g.turn === mine) {
+    const again = g.last && g.last.a === "pair" && g.last.s === mine && g.up.length === 0;
+    text = g.up.length === 2 ? "…" : again ? "Pair! Go again" : g.up.length === 1 || pending ? "Now find its match" : "Your turn: flip two cards";
+    sub = performance.now() < hintUntil ? "A pair is yours and you go again · a miss passes the turn" : `${left} pair${left === 1 ? "" : "s"} left`;
+  } else { text = `${s.i === net.sessionId ? "You" : seatName(s)}${s.b ? " is thinking…" : "'s turn"}`; sub = mine < 0 ? "You're watching · you'll play next game" : `${left} pair${left === 1 ? "" : "s"} left`; }
+  if (g.ph === "play" && g.up.length === 2) text = deckOf(g)[g.up[0]] === deckOf(g)[g.up[1]] ? "A match!" : "No match";
+  if ($("statusText").textContent !== text) $("statusText").textContent = text;
+  if ($("sub").textContent !== sub) $("sub").textContent = sub;
+  $("status").style.top = Math.round(inset.t + 66) + "px";
+  results(g, mine);
+}
+function results(g, mine) {
+  const show = g.ph === "over" && Date.now() > g.endsAt - CONFIG.resultsMs + 1600; // let the last pair land first
+  $("over").hidden = !show;
+  if (!show || resultsFor === g.id) return;
+  resultsFor = g.id;
+  const won = mine >= 0 && g.winner === mine;
+  $("overTitle").textContent = g.winner < 0 ? "It's a tie!" : won ? "You win!" : `${seatName(g.seats[g.winner])} wins!`;
+  $("overSub").textContent = mine >= 0 ? `You found ${g.scores[mine]} pair${g.scores[mine] === 1 ? "" : "s"}.` : "Next game starts soon.";
+  const order = g.seats.map((_, i) => i).sort((a, b) => g.scores[b] - g.scores[a]);
+  $("scores").innerHTML = order.map((i) => `<div class="row"><i style="background:${esc(seatColor(g.seats[i]))}"></i><span>${esc(i === mine ? "You" : seatName(g.seats[i]))}${g.seats[i].b ? " 🤖" : ""}</span><b>${g.scores[i]}</b></div>`).join("");
+  $("again").hidden = mine < 0;
+  const list = $("lb");
+  if (!lb) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading…</li>";
+  (mine >= 0 && g.scores[mine] > 0 ? lb.submit(g.scores[mine], "inc").catch(() => null) : Promise.resolve()).then(() => lb.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No pairs yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").onclick = () => { const g = game(); if (g && g.ph === "over") act("again", {}); };
+
+// ── INPUT / LOOP ────────────────────────────────────────────────────────────────────
+let hoverCard = -1, cursor = -1;
+const cardAt = (x, y) => cardsAt.findIndex((p) => Math.abs(x - p.x) < p.w / 2 && Math.abs(y - p.y) < p.h / 2);
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); const c = cardAt(e.clientX, e.clientY); if (c >= 0) tapCard(c); });
+cv.addEventListener("pointermove", (e) => { hoverCard = cardAt(e.clientX, e.clientY); cv.style.cursor = hoverCard >= 0 ? "pointer" : ""; });
+// Keys: arrows move a highlight over the cards, Space or Enter flips it.
+addEventListener("keydown", (e) => {
+  const g = game();
+  if (!g || !cardsAt.length) return;
+  const cols = cardsAt.filter((p) => Math.abs(p.y - cardsAt[0].y) < 1).length, mv = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -cols, ArrowDown: cols }[e.key];
+  if (mv) { e.preventDefault(); cursor = Math.max(0, Math.min(g.n - 1, (cursor < 0 ? 0 : cursor) + mv)); hoverCard = cursor; }
+  if ((e.key === " " || e.key === "Enter") && cursor >= 0) { e.preventDefault(); tapCard(cursor); }
+});
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+function fixColor() {
+  const g = game(), others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
+  const botColors = g ? g.seats.filter((s) => s.b).map((s) => s.c) : [];
+  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId) && !botColors.includes(myColor)) return;
+  const taken = new Set([...others.map(([, p]) => p.c), ...botColors]), free = COLORS.find((c) => !taken.has(c));
+  if (free) { myColor = free; net.me.set("c", free); }
+}
+
+let myName = "", myColor = COLORS[0], last = performance.now(), lastHb = 0, lastHud = 0;
+try { myName = localStorage.getItem("mpa-name") || ""; } catch {}
+const pickOne = (list) => list[Math.floor(Math.random() * list.length)];
+if (!myName) { myName = pickOne(NAME_A) + " " + pickOne(NAME_B); try { localStorage.setItem("mpa-name", myName); } catch {} }
+if (ATTRACT) { Object.assign(CONFIG, { seats: 3, botMs: 300, peekMs: 600, resultsMs: 1600, botMemory: 0.85 }); $("net").textContent = ""; }
+
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now;
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  if (isHost()) hostTick(); else { host.last = null; host.inbox.length = 0; }
+  const g = game();
+  if (g) {
+    draw(g, now, dt);
+    autopilot(g);
+    if (now - lastHud > 100) { lastHud = now; hud(g); }
+  } else { cx.setTransform(DPR, 0, 0, DPR, 0, 0); cx.fillStyle = "#1a1536"; cx.fillRect(0, 0, W, H); }
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  for (const type of ["flip", "again"]) net.on(type, (data, from) => { if (isHost() && data) host.inbox.push({ type, from, data }); });
+  net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { dropped = false; });
+  if (!net.offline && typeof MP !== "undefined") lb = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || pickOne(COLORS);
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

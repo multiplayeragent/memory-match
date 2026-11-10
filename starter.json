@@ -1,0 +1,21 @@
+{
+  "name": "Memory Match",
+  "genre": "board",
+  "dim": "2D",
+  "mode": "Turn-based",
+  "players": "1–4",
+  "hook": "Flip two. Find the pair. Go again.",
+  "how": "On your turn flip two cards. A matching pair is yours and you go again; a miss turns them back and passes the turn. When the board is empty, most pairs wins.",
+  "controls": "Click or tap a card to flip it (arrows + Space work too)",
+  "uses": [
+    ["Host-run rules", "The host's browser checks every flip and runs the turns; if it leaves, the next player takes over."],
+    ["Bots", "A bot takes the empty seat when you're alone, remembering some of the cards it has seen."],
+    ["Live sync", "The host shuffles from a seed, so every screen deals the same board and sees every flip."],
+    ["Leaderboard", "Pairs found, added up over every game, shown after each game."]
+  ],
+  "ideas": [
+    "Make the board 6 by 6 with 18 pairs",
+    "Add a shuffle card that moves every face-down card",
+    "Use animal faces instead of shapes"
+  ]
+}
