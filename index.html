@@ -7,7 +7,7 @@
 <style>
   :root { --ink: #f6f1ff; --gold: #ffd166; --panel: #2a2150; }
   html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #1a1536; }
-  body { color: var(--ink); font: 15px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; user-select: none; -webkit-user-select: none; }
+  body { color: var(--ink); font: 15px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
   #board { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   #safe { position: fixed; visibility: hidden; pointer-events: none; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   #status { position: fixed; left: 0; right: 0; top: 80px; text-align: center; pointer-events: none; padding: 0 12px; }
@@ -22,7 +22,7 @@
          border: 1px solid #ffffff22; text-align: center; box-shadow: 0 20px 60px #0009; }
   .box h2 { margin: 0 0 4px; font-size: 26px; } .box p { margin: 0 0 10px; opacity: .85; }
   .box h3 { margin: 8px 0 4px; font-size: 13px; color: var(--gold); text-align: left; }
-  .box ol { text-align: left; margin: 0 0 10px; padding-left: 24px; font-size: 14px; min-height: 24px; } .box li span { float: right; }
+  .box ol { text-align: left; margin: 0 0 10px; padding-left: 24px; font-size: 14px; min-height: 24px; } .box li.note { list-style: none; margin-left: -24px; opacity: .8; } .box li span { float: right; }
   .row { display: flex; gap: 8px; align-items: center; text-align: left; font-size: 15px; padding: 3px 0; }
   .row i { width: 12px; height: 12px; border-radius: 50%; flex: none; } .row span { flex: 1; } .row b { min-width: 30px; text-align: right; }
   button { min-height: 48px; border-radius: 12px; border: 0; font: 800 16px system-ui, sans-serif; cursor: pointer; }
@@ -40,7 +40,7 @@
 <div id="over" hidden><div class="box">
   <h2 id="overTitle"></h2><p id="overSub"></p>
   <div id="scores"></div>
-  <h3>Most pairs found</h3><ol id="lb"><li>Loading…</li></ol>
+  <h3>Most pairs found</h3><ol id="lb"><li class="note">Loading…</li></ol>
   <button id="again">Play again</button>
 </div></div>
 <script>
@@ -397,6 +397,7 @@ function drawCard(g, i, p, now, dt, shown) {
     cx.restore();
     cx.strokeStyle = "#ffd16699"; cx.lineWidth = 1.5; roundRect(-w / 2 + w * 0.08, -h / 2 + w * 0.08, w * 0.84, h - w * 0.16, w * 0.08); cx.stroke();
     cx.fillStyle = "#ffd166"; cx.font = `900 ${Math.round(w * 0.34)}px system-ui, sans-serif`; cx.textAlign = "center"; cx.textBaseline = "middle"; cx.fillText("?", 0, w * 0.02);
+    if (i === cursor && myTurn(g)) { cx.strokeStyle = "#ffd166"; cx.lineWidth = 4; roundRect(-w / 2 - 3, -h / 2 - 3, w + 6, h + 6, w * 0.14); cx.stroke(); } // the arrow-key highlight
   }
   cx.restore();
 }
@@ -532,19 +533,21 @@ function results(g, mine) {
   $("scores").innerHTML = order.map((i) => `<div class="row"><i style="background:${esc(seatColor(g.seats[i]))}"></i><span>${esc(i === mine ? "You" : seatName(g.seats[i]))}${g.seats[i].b ? " 🤖" : ""}</span><b>${g.scores[i]}</b></div>`).join("");
   $("again").hidden = mine < 0;
   const list = $("lb");
-  if (!lb) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
-  list.innerHTML = "<li>Loading…</li>";
+  if (!lb) { list.innerHTML = "<li class='note'>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li class='note'>Loading…</li>";
   (mine >= 0 && g.scores[mine] > 0 ? lb.submit(g.scores[mine], "inc").catch(() => null) : Promise.resolve()).then(() => lb.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No pairs yet. Be the first.</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li class='note'>No pairs yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li class='note'>Couldn't load the leaderboard.</li>"; });
 }
 $("again").onclick = () => { const g = game(); if (g && g.ph === "over") act("again", {}); };
 
 // ── INPUT / LOOP ────────────────────────────────────────────────────────────────────
 let hoverCard = -1, cursor = -1;
 const cardAt = (x, y) => cardsAt.findIndex((p) => Math.abs(x - p.x) < p.w / 2 && Math.abs(y - p.y) < p.h / 2);
-cv.addEventListener("pointerdown", (e) => { e.preventDefault(); const c = cardAt(e.clientX, e.clientY); if (c >= 0) tapCard(c); });
-cv.addEventListener("pointermove", (e) => { hoverCard = cardAt(e.clientX, e.clientY); cv.style.cursor = hoverCard >= 0 ? "pointer" : ""; });
+cv.addEventListener("contextmenu", (e) => e.preventDefault()); // no browser menu over the cards
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); if (e.button > 0) return; const c = cardAt(e.clientX, e.clientY); if (c >= 0) tapCard(c); });
+cv.addEventListener("pointermove", (e) => { if (e.pointerType === "touch") return; // a finger leaves no hover behind
+  hoverCard = cardAt(e.clientX, e.clientY); cursor = -1; cv.style.cursor = hoverCard >= 0 ? "pointer" : ""; });
 // Keys: arrows move a highlight over the cards, Space or Enter flips it.
 addEventListener("keydown", (e) => {
   const g = game();
